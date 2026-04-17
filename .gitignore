@@ -7,3 +7,9 @@ __pycache__/
 *.mkv
 .idea/
 .vscode/
+build/
+dist/
+release/
+build_assets/
+*.spec
+*.zip

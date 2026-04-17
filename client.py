@@ -25,10 +25,20 @@ Usage:
 
 import argparse
 import asyncio
+import os
 import struct
 import subprocess
 import sys
 import time
+
+
+def ffmpeg_path() -> str:
+    """Return path to ffmpeg.exe. Uses bundled binary when frozen (PyInstaller)."""
+    if hasattr(sys, "_MEIPASS"):
+        bundled = os.path.join(sys._MEIPASS, "ffmpeg.exe")
+        if os.path.exists(bundled):
+            return bundled
+    return "ffmpeg"
 
 import cv2
 import numpy as np
@@ -59,7 +69,7 @@ def build_ffmpeg_cmd(device: str, width: int, height: int, fps: int, platform: s
         raise ValueError(f"unknown platform: {platform}")
 
     return [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        ffmpeg_path(), "-hide_banner", "-loglevel", "error",
         *input_args,
         "-f", "mjpeg", "-q:v", "5", "-",
     ]
@@ -177,7 +187,8 @@ async def run(args):
         sink = WindowSink()
 
     try:
-        async with websockets.connect(args.server, max_size=2**24, ping_interval=20) as ws:
+        async with websockets.connect(args.server, max_size=2**24, ping_interval=20,
+                                       open_timeout=60) as ws:
             print(f"connected {args.server}", file=sys.stderr)
             await asyncio.gather(sender(ws, reader, state), receiver(ws, sink, state))
     finally:
@@ -189,10 +200,30 @@ async def run(args):
         sink.close()
 
 
+def list_dshow_devices():
+    """Print available DirectShow video devices (Windows only)."""
+    cmd = [ffmpeg_path(), "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    output = (proc.stderr or "") + (proc.stdout or "")
+    in_video = False
+    for line in output.splitlines():
+        if "(video)" in line:
+            in_video = True
+            name = line.split('"')[1] if '"' in line else line
+            print(f'  --device "video={name}"')
+        elif "(audio)" in line:
+            in_video = False
+    if not in_video and "(video)" not in output:
+        print("(no video devices found)")
+        print(output)
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--server", required=True, help="wss://host:port/ws")
-    p.add_argument("--device", required=True, help='e.g. "video=HD Pro Webcam C920"')
+    p.add_argument("--list-devices", action="store_true",
+                   help="List DirectShow video devices and exit.")
+    p.add_argument("--server", help="wss://host:port/ws")
+    p.add_argument("--device", help='e.g. "video=HD Pro Webcam C920"')
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
@@ -201,6 +232,14 @@ def main():
                    help="virtualcam: feed frames into system virtual webcam (default). "
                         "window: preview via OpenCV window.")
     args = p.parse_args()
+
+    if args.list_devices:
+        list_dshow_devices()
+        return
+
+    if not args.server or not args.device:
+        p.error("--server and --device are required (unless --list-devices)")
+
     try:
         asyncio.run(run(args))
     except KeyboardInterrupt:
