@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"C:/Users/Jasikk/projects/deepfakee/.venv/Scripts/python.exe -c \\\"import websockets, cv2, numpy; print('OK', cv2.__version__, websockets.__version__)\\\" 2>&1\",\"description\":\"Verify deps inst...",
+  "error": "Exit code 1\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\n    import websockets, cv2, numpy; print('OK', cv2.__version__, websockets.__version__)\r\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\nModuleNotFoundError: No module named 'websockets'",
+  "timestamp": "2026-04-17T18:05:46.021Z",
+  "retry_count": 1
+}

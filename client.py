@@ -2,7 +2,14 @@
 Webcam -> RunPod WebSocket client.
 
 Captures webcam via ffmpeg (MJPEG), streams JPEG frames to remote deepfake
-server over WebSocket, displays processed frames back via OpenCV window.
+server over WebSocket. Processed frames come back and are routed to either a
+preview window (--output window) or a system virtual webcam (--output virtualcam)
+so other apps (Zoom, browsers, OBS) can consume the deepfake stream.
+
+Virtual cam backend is auto-detected by pyvirtualcam:
+  - OBS Virtual Camera (device name: "OBS Virtual Camera")  -- requires OBS Studio installed
+  - Unity Capture        (device name: "Unity Video Capture") -- standalone driver
+pyvirtualcam picks whichever DirectShow filter is registered on the system.
 
 Protocol (binary WS message, both directions):
     [8 bytes frame_id, big-endian uint64]
@@ -10,10 +17,10 @@ Protocol (binary WS message, both directions):
     [JPEG payload]
 
 Usage:
-    pip install websockets opencv-python numpy
-    # ensure ffmpeg on PATH
+    pip install websockets opencv-python numpy pyvirtualcam
+    # ensure ffmpeg on PATH and OBS Studio or Unity Capture installed for --output virtualcam
     python client.py --server wss://<runpod-host>:<port>/ws \
-        --device "video=HD Pro Webcam C920" --width 640 --height 480 --fps 30
+        --device "video=HD Pro Webcam C920" --width 640 --height 480 --fps 30 --output virtualcam
 """
 
 import argparse
@@ -22,11 +29,15 @@ import struct
 import subprocess
 import sys
 import time
-from collections import deque
 
 import cv2
 import numpy as np
 import websockets
+
+try:
+    import pyvirtualcam
+except ImportError:
+    pyvirtualcam = None
 
 SOI = b"\xff\xd8"
 EOI = b"\xff\xd9"
@@ -94,7 +105,39 @@ async def sender(ws, reader: JpegReader, state: dict):
         state["sent"] = frame_id
 
 
-async def receiver(ws, state: dict):
+class WindowSink:
+    def send(self, img, frame_id, rtt_ms):
+        cv2.putText(img, f"id={frame_id} rtt={rtt_ms}ms", (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.imshow("deepfake", img)
+        return (cv2.waitKey(1) & 0xFF) == ord("q")
+
+    def close(self):
+        cv2.destroyAllWindows()
+
+
+class VirtualCamSink:
+    def __init__(self, width, height, fps):
+        if pyvirtualcam is None:
+            raise RuntimeError("pyvirtualcam not installed. pip install pyvirtualcam")
+        self.width = width
+        self.height = height
+        self.cam = pyvirtualcam.Camera(width=width, height=height, fps=fps,
+                                       fmt=pyvirtualcam.PixelFormat.BGR)
+        print(f"virtualcam: {self.cam.device} {width}x{height}@{fps}", file=sys.stderr)
+
+    def send(self, img, frame_id, rtt_ms):
+        if img.shape[1] != self.width or img.shape[0] != self.height:
+            img = cv2.resize(img, (self.width, self.height))
+        self.cam.send(img)
+        self.cam.sleep_until_next_frame()
+        return False
+
+    def close(self):
+        self.cam.close()
+
+
+async def receiver(ws, sink, state: dict):
     latest_id = 0
     while True:
         try:
@@ -115,10 +158,8 @@ async def receiver(ws, state: dict):
         rtt = int(time.time() * 1000) - ts
         state["rtt_ms"] = rtt
         state["recv"] = frame_id
-        cv2.putText(img, f"id={frame_id} rtt={rtt}ms", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.imshow("deepfake", img)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        should_quit = sink.send(img, frame_id, rtt)
+        if should_quit:
             await ws.close()
             return
 
@@ -130,17 +171,22 @@ async def run(args):
     reader = JpegReader(proc.stdout)
     state = {"sent": 0, "recv": 0, "rtt_ms": 0}
 
+    if args.output == "virtualcam":
+        sink = VirtualCamSink(args.width, args.height, args.fps)
+    else:
+        sink = WindowSink()
+
     try:
         async with websockets.connect(args.server, max_size=2**24, ping_interval=20) as ws:
             print(f"connected {args.server}", file=sys.stderr)
-            await asyncio.gather(sender(ws, reader, state), receiver(ws, state))
+            await asyncio.gather(sender(ws, reader, state), receiver(ws, sink, state))
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
-        cv2.destroyAllWindows()
+        sink.close()
 
 
 def main():
@@ -151,6 +197,9 @@ def main():
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--platform", choices=["windows", "linux", "mac"], default="windows")
+    p.add_argument("--output", choices=["virtualcam", "window"], default="virtualcam",
+                   help="virtualcam: feed frames into system virtual webcam (default). "
+                        "window: preview via OpenCV window.")
     args = p.parse_args()
     try:
         asyncio.run(run(args))
